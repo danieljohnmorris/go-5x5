@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>5x5 Go</title>
+  <style>
+    :root {
+      --board-bg: #d9b370;
+      --line: #2a1a0a;
+      --black: #1a1a1a;
+      --white: #f5f5f0;
+      --panel: #1f1a14;
+      --text: #f5efe2;
+      --accent: #d9b370;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      background: #0e0c08;
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .wrap {
+      width: 100%;
+      max-width: 520px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .board-card {
+      background: var(--board-bg);
+      border-radius: 10px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+      aspect-ratio: 1 / 1;
+      position: relative;
+    }
+    svg.board {
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: pointer;
+    }
+    .controls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    button {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid #3a3024;
+      padding: 8px 14px;
+      border-radius: 6px;
+      font: inherit;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    button:hover:not(:disabled) { background: #2a241b; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status {
+      font-size: 14px;
+      letter-spacing: 0.02em;
+      color: var(--text);
+      min-height: 1.4em;
+    }
+    .score {
+      margin-left: auto;
+      font-size: 13px;
+      color: #b8ad95;
+    }
+    .score b { color: var(--text); font-weight: 600; }
+    .end {
+      position: absolute;
+      inset: 0;
+      background: rgba(14, 12, 8, 0.78);
+      border-radius: 10px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 12px;
+      color: var(--text);
+      text-align: center;
+      padding: 24px;
+    }
+    .end.show { display: flex; }
+    .end h2 { font-size: 22px; font-weight: 600; }
+    .end p { color: #c4b89e; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="status" id="status">Your move (Black).</div>
+    <div class="board-card">
+      <svg class="board" id="board" viewBox="0 0 500 500" aria-label="5x5 Go board"></svg>
+      <div class="end" id="end">
+        <h2 id="endTitle">Game over</h2>
+        <p id="endDetail"></p>
+        <button id="endReset">New game</button>
+      </div>
+    </div>
+    <div class="controls">
+      <button id="passBtn">Pass</button>
+      <button id="resetBtn">New game</button>
+      <span class="score" id="score">Black <b id="bs">0</b> &nbsp; White <b id="ws">0</b></span>
+    </div>
+  </div>
+
+<script>
+  const N = 5;
+  const EMPTY = 0, BLACK = 1, WHITE = 2;
+  const HUMAN = BLACK, AI = WHITE;
+  const KOMI = 2.5;
+
+  let board, toMove, captures, koPoint, lastWasPass, gameOver;
+
+  function newGame() {
+    board = Array.from({ length: N }, () => new Array(N).fill(EMPTY));
+    toMove = BLACK;
+    captures = { [BLACK]: 0, [WHITE]: 0 };
+    koPoint = null;
+    lastWasPass = false;
+    gameOver = false;
+    document.getElementById('end').classList.remove('show');
+    render();
+    setStatus('Your move (Black).');
+    updateScore();
+  }
+
+  const neighbors = (x, y) => {
+    const out = [];
+    if (x > 0) out.push([x - 1, y]);
+    if (x < N - 1) out.push([x + 1, y]);
+    if (y > 0) out.push([x, y - 1]);
+    if (y < N - 1) out.push([x, y + 1]);
+    return out;
+  };
+
+  function cloneBoard(b) { return b.map(row => row.slice()); }
+
+  function findGroup(b, x, y) {
+    const colour = b[y][x];
+    const stones = [];
+    const liberties = new Set();
+    const seen = new Set();
+    const stack = [[x, y]];
+    while (stack.length) {
+      const [cx, cy] = stack.pop();
+      const key = cx + ',' + cy;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      stones.push([cx, cy]);
+      for (const [nx, ny] of neighbors(cx, cy)) {
+        const c = b[ny][nx];
+        if (c === EMPTY) liberties.add(nx + ',' + ny);
+        else if (c === colour && !seen.has(nx + ',' + ny)) stack.push([nx, ny]);
+      }
+    }
+    return { stones, liberties };
+  }
+
+  function tryMove(b, x, y, colour, ko) {
+    if (b[y][x] !== EMPTY) return null;
+    if (ko && ko[0] === x && ko[1] === y && ko[2] === colour) return null;
+    const opp = colour === BLACK ? WHITE : BLACK;
+    const nb = cloneBoard(b);
+    nb[y][x] = colour;
+
+    const captured = [];
+    const checked = new Set();
+    for (const [nx, ny] of neighbors(x, y)) {
+      if (nb[ny][nx] !== opp) continue;
+      const key = nx + ',' + ny;
+      if (checked.has(key)) continue;
+      const g = findGroup(nb, nx, ny);
+      g.stones.forEach(([sx, sy]) => checked.add(sx + ',' + sy));
+      if (g.liberties.size === 0) {
+        for (const [sx, sy] of g.stones) {
+          nb[sy][sx] = EMPTY;
+          captured.push([sx, sy]);
+        }
+      }
+    }
+
+    const own = findGroup(nb, x, y);
+    if (own.liberties.size === 0) return null;
+
+    let nextKo = null;
+    if (captured.length === 1 && own.stones.length === 1 && own.liberties.size === 1) {
+      const [cx, cy] = captured[0];
+      nextKo = [cx, cy, opp];
+    }
+
+    return { board: nb, captured, koPoint: nextKo };
+  }
+
+  function legalMoves(b, colour, ko) {
+    const out = [];
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        if (b[y][x] !== EMPTY) continue;
+        if (tryMove(b, x, y, colour, ko)) out.push([x, y]);
+      }
+    }
+    return out;
+  }
+
+  function score(b) {
+    let blackArea = 0, whiteArea = 0;
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        if (b[y][x] === BLACK) blackArea++;
+        else if (b[y][x] === WHITE) whiteArea++;
+      }
+    }
+    const seen = new Set();
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        if (b[y][x] !== EMPTY) continue;
+        const key = x + ',' + y;
+        if (seen.has(key)) continue;
+        const region = [];
+        const borders = new Set();
+        const stack = [[x, y]];
+        while (stack.length) {
+          const [cx, cy] = stack.pop();
+          const k = cx + ',' + cy;
+          if (seen.has(k)) continue;
+          seen.add(k);
+          region.push([cx, cy]);
+          for (const [nx, ny] of neighbors(cx, cy)) {
+            const c = b[ny][nx];
+            if (c === EMPTY) {
+              if (!seen.has(nx + ',' + ny)) stack.push([nx, ny]);
+            } else borders.add(c);
+          }
+        }
+        if (borders.size === 1) {
+          if (borders.has(BLACK)) blackArea += region.length;
+          else whiteArea += region.length;
+        }
+      }
+    }
+    return { black: blackArea, white: whiteArea + KOMI };
+  }
+
+  function evaluate(b) {
+    const s = score(b);
+    return s.white - s.black;
+  }
+
+  function aiMove() {
+    const moves = legalMoves(board, AI, koPoint);
+    let best = null;
+    let bestScore = -Infinity;
+    const baseline = evaluate(board);
+
+    for (const [x, y] of moves) {
+      const r = tryMove(board, x, y, AI, koPoint);
+      if (!r) continue;
+      let v = evaluate(r.board);
+      const cx = Math.abs(x - 2), cy = Math.abs(y - 2);
+      v += (4 - (cx + cy)) * 0.01;
+      v += Math.random() * 0.001;
+      if (v > bestScore) {
+        bestScore = v;
+        best = [x, y];
+      }
+    }
+
+    if (best === null || (bestScore < baseline - 0.5 && baseline > 0)) return null;
+    return best;
+  }
+
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const PAD = 50;
+  const STEP = (500 - 2 * PAD) / (N - 1);
+
+  function clearChildren(node) {
+    while (node.firstChild) node.removeChild(node.firstChild);
+  }
+
+  function render() {
+    const svg = document.getElementById('board');
+    clearChildren(svg);
+
+    for (let i = 0; i < N; i++) {
+      const a = PAD + i * STEP;
+      const h = document.createElementNS(SVG_NS, 'line');
+      h.setAttribute('x1', PAD); h.setAttribute('x2', 500 - PAD);
+      h.setAttribute('y1', a); h.setAttribute('y2', a);
+      h.setAttribute('stroke', 'var(--line)');
+      h.setAttribute('stroke-width', '1.5');
+      svg.appendChild(h);
+      const v = document.createElementNS(SVG_NS, 'line');
+      v.setAttribute('y1', PAD); v.setAttribute('y2', 500 - PAD);
+      v.setAttribute('x1', a); v.setAttribute('x2', a);
+      v.setAttribute('stroke', 'var(--line)');
+      v.setAttribute('stroke-width', '1.5');
+      svg.appendChild(v);
+    }
+
+    const star = document.createElementNS(SVG_NS, 'circle');
+    star.setAttribute('cx', PAD + 2 * STEP);
+    star.setAttribute('cy', PAD + 2 * STEP);
+    star.setAttribute('r', 3.5);
+    star.setAttribute('fill', 'var(--line)');
+    svg.appendChild(star);
+
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const r = document.createElementNS(SVG_NS, 'rect');
+        r.setAttribute('x', PAD + x * STEP - STEP / 2);
+        r.setAttribute('y', PAD + y * STEP - STEP / 2);
+        r.setAttribute('width', STEP);
+        r.setAttribute('height', STEP);
+        r.setAttribute('fill', 'transparent');
+        r.dataset.x = x;
+        r.dataset.y = y;
+        r.addEventListener('click', onCellClick);
+        svg.appendChild(r);
+      }
+    }
+
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        if (board[y][x] === EMPTY) continue;
+        const c = document.createElementNS(SVG_NS, 'circle');
+        c.setAttribute('cx', PAD + x * STEP);
+        c.setAttribute('cy', PAD + y * STEP);
+        c.setAttribute('r', STEP * 0.46);
+        c.setAttribute('fill', board[y][x] === BLACK ? 'var(--black)' : 'var(--white)');
+        c.setAttribute('stroke', 'rgba(0,0,0,0.4)');
+        c.setAttribute('stroke-width', '0.8');
+        svg.appendChild(c);
+      }
+    }
+  }
+
+  function onCellClick(e) {
+    if (gameOver || toMove !== HUMAN) return;
+    const x = +e.target.dataset.x;
+    const y = +e.target.dataset.y;
+    const r = tryMove(board, x, y, HUMAN, koPoint);
+    if (!r) {
+      flashStatus('Illegal move.');
+      return;
+    }
+    applyMove(r, HUMAN, false);
+    if (gameOver) return;
+    setTimeout(aiTurn, 280);
+  }
+
+  function applyMove(r, colour, isPass) {
+    if (isPass) {
+      if (lastWasPass) { toMove = colour === BLACK ? WHITE : BLACK; return endGame(); }
+      lastWasPass = true;
+      koPoint = null;
+    } else {
+      board = r.board;
+      captures[colour] += r.captured.length;
+      koPoint = r.koPoint;
+      lastWasPass = false;
+    }
+    toMove = colour === BLACK ? WHITE : BLACK;
+    render();
+    updateScore();
+    setStatus(toMove === HUMAN ? 'Your move (Black).' : 'White is thinking…');
+  }
+
+  function aiTurn() {
+    if (gameOver) return;
+    const move = aiMove();
+    if (move === null) {
+      applyMove(null, AI, true);
+      return;
+    }
+    const r = tryMove(board, move[0], move[1], AI, koPoint);
+    applyMove(r, AI, false);
+  }
+
+  function endGame() {
+    gameOver = true;
+    const s = score(board);
+    const bs = s.black, ws = s.white;
+    let msg, detail;
+    if (bs > ws) { msg = 'Black wins'; detail = bs.toFixed(1) + ' vs ' + ws.toFixed(1) + ' (komi ' + KOMI + ').'; }
+    else if (ws > bs) { msg = 'White wins'; detail = ws.toFixed(1) + ' vs ' + bs.toFixed(1) + ' (komi ' + KOMI + ').'; }
+    else { msg = 'Draw'; detail = bs.toFixed(1) + ' each.'; }
+    document.getElementById('endTitle').textContent = msg;
+    document.getElementById('endDetail').textContent = detail;
+    document.getElementById('end').classList.add('show');
+    setStatus(msg + ' - ' + detail);
+  }
+
+  function setStatus(t) { document.getElementById('status').textContent = t; }
+  let statusTimer = null;
+  function flashStatus(t) {
+    setStatus(t);
+    clearTimeout(statusTimer);
+    statusTimer = setTimeout(() => {
+      if (gameOver) return;
+      setStatus(toMove === HUMAN ? 'Your move (Black).' : 'White is thinking…');
+    }, 1200);
+  }
+
+  function updateScore() {
+    const s = score(board);
+    document.getElementById('bs').textContent = s.black.toFixed(1);
+    document.getElementById('ws').textContent = s.white.toFixed(1);
+  }
+
+  document.getElementById('passBtn').addEventListener('click', () => {
+    if (gameOver || toMove !== HUMAN) return;
+    applyMove(null, HUMAN, true);
+    if (gameOver) return;
+    setTimeout(aiTurn, 280);
+  });
+  document.getElementById('resetBtn').addEventListener('click', newGame);
+  document.getElementById('endReset').addEventListener('click', newGame);
+
+  window.__go = {
+    state: () => ({ board, toMove, captures, koPoint, gameOver, score: score(board) }),
+    play: (x, y) => {
+      const r = tryMove(board, x, y, toMove, koPoint);
+      if (r) applyMove(r, toMove, false);
+      return !!r;
+    },
+    pass: () => applyMove(null, toMove, true),
+    reset: newGame,
+    // Test hooks (pure):
+    tryMove,
+    score,
+    legalMoves,
+    setBoard: (b, t = BLACK, k = null) => { board = b.map(r => r.slice()); toMove = t; koPoint = k; lastWasPass = false; gameOver = false; render(); updateScore(); },
+  };
+
+  newGame();
+</script>
+</body>
+</html>
