@@ -274,7 +274,12 @@
       }
     }
 
-    if (best === null || (bestScore < baseline - 0.5 && baseline > 0)) return null;
+    if (best === null) return null;
+    // Resign by passing when even the best move leaves us losing decisively
+    // (more than 6 points behind on a 25-point board).
+    if (bestScore < -6) return null;
+    // Pass when no move improves on the current evaluation and we are ahead.
+    if (bestScore < baseline - 0.5 && baseline > 0) return null;
     return best;
   }
 
