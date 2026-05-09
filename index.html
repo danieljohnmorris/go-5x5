@@ -255,16 +255,32 @@
     return s.white - s.black;
   }
 
+  // Eval after Black plays its best (eval-minimising) reply on board b.
+  function evalAfterBlackReply(b, ko) {
+    const moves = legalMoves(b, BLACK, ko);
+    let worst = evaluate(b); // Black may also pass
+    for (const [x, y] of moves) {
+      const r = tryMove(b, x, y, BLACK, ko);
+      if (!r) continue;
+      const v = evaluate(r.board);
+      if (v < worst) worst = v;
+    }
+    return worst;
+  }
+
   function aiMove() {
     const moves = legalMoves(board, AI, koPoint);
+    // What happens if AI passes? Black plays best move (or passes).
+    const passScore = evalAfterBlackReply(board, null);
+
     let best = null;
     let bestScore = -Infinity;
-    const baseline = evaluate(board);
 
     for (const [x, y] of moves) {
       const r = tryMove(board, x, y, AI, koPoint);
       if (!r) continue;
-      let v = evaluate(r.board);
+      // 2-ply minimax: AI plays here, Black replies optimally.
+      let v = evalAfterBlackReply(r.board, r.koPoint);
       const cx = Math.abs(x - 2), cy = Math.abs(y - 2);
       v += (4 - (cx + cy)) * 0.01;
       v += Math.random() * 0.001;
@@ -274,12 +290,8 @@
       }
     }
 
-    if (best === null) return null;
-    // Resign by passing when even the best move leaves us losing decisively
-    // (more than 6 points behind on a 25-point board).
-    if (bestScore < -6) return null;
-    // Pass when no move improves on the current evaluation and we are ahead.
-    if (bestScore < baseline - 0.5 && baseline > 0) return null;
+    // Pass when no move beats passing.
+    if (best === null || bestScore <= passScore) return null;
     return best;
   }
 
@@ -376,7 +388,11 @@
     toMove = colour === BLACK ? WHITE : BLACK;
     render();
     updateScore();
-    setStatus(toMove === HUMAN ? 'Your move (Black).' : 'White is thinking…');
+    if (toMove === HUMAN) {
+      setStatus(isPass ? 'White passed. Your move (pass again to end the game).' : 'Your move (Black).');
+    } else {
+      setStatus('White is thinking…');
+    }
   }
 
   function aiTurn() {
